@@ -42,6 +42,20 @@ def retry_with_exponential_backoff(
                 raise e
     return wrapper
 
+def _move_inputs_to_device(inputs: dict, device):
+    """Move tensor inputs to device (recursively for dicts)."""
+    out = {}
+    for k, v in inputs.items():
+        try:
+            out[k] = v.to(device) if hasattr(v, "to") else v
+        except Exception:
+            # if it's a list/tuple of tensors, move each element
+            if isinstance(v, (list, tuple)):
+                out[k] = type(v)([x.to(device) if hasattr(x, "to") else x for x in v])
+            else:
+                out[k] = v
+    return out
+
 class VLMBackend(ABC):
     """Abstract base class for VLM backends"""
     
@@ -343,39 +357,72 @@ class LocalHuggingFaceBackend(VLMBackend):
             raise
     
     def get_query(self, img: Union[Image.Image, np.ndarray], text: str, module_name: str = "Unknown") -> str:
-        """Process an image and text prompt using local HuggingFace model"""
-        # Handle both PIL Images and numpy arrays
-        if hasattr(img, 'convert'):  # It's a PIL Image
+        """Process an image and text prompt using local HuggingFace model (Qwen2-VL style)."""
+        # Normalize image to PIL.Image
+        if hasattr(img, "convert"):          # PIL Image
             image = img
-        elif hasattr(img, 'shape'):  # It's a numpy array
+        elif hasattr(img, "shape"):          # numpy array
             image = Image.fromarray(img)
         else:
             raise ValueError(f"Unsupported image type: {type(img)}")
-        
-        # Prepare inputs
-        inputs = self.processor(text=text, images=image, return_tensors="pt")
-        
-        # Move inputs to the same device as model
-        if hasattr(self.model, 'device'):
+
+        # Prepare messages so the chat template includes the image placeholder token
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},   # used by apply_chat_template only
+                    {"type": "text", "text": text}
+                ]
+            }
+        ]
+
+        # Build text prompt with image placeholder
+        prompt_text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        # Call processor with the prompt_text AND pass the actual image(s) separately.
+        # Use a list for images (batch dimension of 1).
+        inputs = self.processor(text=prompt_text, images=[image], return_tensors="pt")
+
+        # Move tensors to model device if present
+        if hasattr(self.model, "device"):
             device = self.model.device
-            inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
-        
-        return self._generate_response(inputs, text, module_name)
+            inputs = _move_inputs_to_device(inputs, device)
+
+        return self._generate_response(inputs, prompt_text, module_name)
     
     def get_text_query(self, text: str, module_name: str = "Unknown") -> str:
-        """Process a text-only prompt using local HuggingFace model"""
-        # For text-only queries, we'll create a dummy white image
-        dummy_image = Image.new('RGB', (224, 224), color='white')
-        
-        # Prepare inputs
-        inputs = self.processor(text=text, images=dummy_image, return_tensors="pt")
-        
-        # Move inputs to the same device as model
-        if hasattr(self.model, 'device'):
+        """Process a text-only prompt using local HuggingFace model.
+        Some VL processors expect an image token, so we supply a small dummy image.
+        """
+        # Small dummy image (RGB)
+        dummy_image = Image.new("RGB", (224, 224), color="white")
+
+        # Messages must include an image placeholder for the chat template
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": dummy_image},
+                    {"type": "text", "text": text}
+                ]
+            }
+        ]
+
+        prompt_text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        # Provide dummy_image in images list (batch dim = 1)
+        inputs = self.processor(text=prompt_text, images=[dummy_image], return_tensors="pt")
+
+        if hasattr(self.model, "device"):
             device = self.model.device
-            inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
-        
-        return self._generate_response(inputs, text, module_name)
+            inputs = _move_inputs_to_device(inputs, device)
+
+        return self._generate_response(inputs, prompt_text, module_name)
 
 class LegacyOllamaBackend(VLMBackend):
     """Legacy Ollama backend for backward compatibility"""

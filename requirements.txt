@@ -19,6 +19,8 @@ pydantic>=2.0.0
 
 # Game Boy Advance emulator dependencies
 mgba==0.10.2      # For GBA emulation
+pygba==0.2.9
+pygame==2.6.1
 
 # Additional dependencies to resolve conflicts
 pyyaml>=5.1       # Required by multiple packages
