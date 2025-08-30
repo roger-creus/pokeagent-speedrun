@@ -330,9 +330,9 @@ def init_pygame():
     font = pygame.font.Font(None, 24)
     clock = pygame.time.Clock()
 
-def run_fastapi_server(port):
+def run_fastapi_server(host, port):
     """Run FastAPI server in background thread"""
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="error")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="error")
 
     # Create a new Socket.IO server
     sio = socketio.AsyncServer(cors_allowed_origins='*')
@@ -954,6 +954,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     parser = argparse.ArgumentParser(description="Simple Pokemon Emerald Server")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host for FastAPI server")
     parser.add_argument("--port", type=int, default=8000, help="Port for FastAPI server")
     parser.add_argument("--manual", action="store_true", help="Enable manual mode with keyboard input and overlay")
     parser.add_argument("--load-state", type=str, help="Load a saved state file on startup")
@@ -985,7 +986,7 @@ def main():
             print("Continuing with fresh game state...")
     
     # Start FastAPI server in background thread
-    server_thread = threading.Thread(target=run_fastapi_server, args=(args.port,), daemon=True)
+    server_thread = threading.Thread(target=run_fastapi_server, args=(args.host, args.port), daemon=True)
     server_thread.start()
     
     print(f"FastAPI server running on http://127.0.0.1:{args.port}")
