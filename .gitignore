@@ -4,7 +4,16 @@
 *.cpython
 *.pem
 *.gba
+*.sif
 llm_log_*
+hub/*
+milestones_progress.json
+submission.log
+llm_logs/*
+run_job_local.sh
+start_server.sh
+run_job.sbatch
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
