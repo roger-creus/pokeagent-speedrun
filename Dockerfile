@@ -1,43 +1,37 @@
-# Use an Ubuntu 20.04 image with CUDA 11.8 and cuDNN (works with torch cu118)
+# Dockerfile for updated pokeagent (v2) + LLM stack + mgba + pokeemerald build
 FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CONDA_DIR=/opt/conda \
     PATH=/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    HF_HOME=/opt/huggingface
+    HF_HOME=/opt/huggingface \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8
 
-# 1) Install system packages commonly needed (build tools, libs for bitsandbytes, pokeemerald)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+# 1) System deps (including tesseract)
+RUN apt-get update && apt-get install -y --no-install-recommends \
       wget xz-utils ca-certificates curl git build-essential \
       binutils-arm-none-eabi libpng-dev binutils make gcc python3 python3-dev \
       xz-utils dpkg-dev unzip locales pkg-config libsndfile1 libgl1 libglib2.0-0 \
-      libx11-6 libxrender1 libxext6 cmake ninja-build libc6-dev && \
-    locale-gen en_US.UTF-8 && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+      libx11-6 libxrender1 libxext6 cmake ninja-build libc6-dev \
+      tesseract-ocr \
+    && locale-gen en_US.UTF-8 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# install tmux
-RUN apt-get update && apt-get install -y tmux && rm -rf /var/lib/apt/lists/*
-
-# copy startup script
-COPY start_server.sh /opt/start_server.sh
-RUN chmod +x /opt/start_server.sh
-
-# 2) Install Miniconda
+# 2) Miniconda
 ENV MINICONDA_VER=py39_4.12.0
 RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-${MINICONDA_VER}-Linux-x86_64.sh -O /tmp/miniconda.sh && \
     bash /tmp/miniconda.sh -b -p ${CONDA_DIR} && \
     rm /tmp/miniconda.sh && \
     ${CONDA_DIR}/bin/conda clean -tipsy
-
 ENV PATH=${CONDA_DIR}/bin:$PATH
 
-# 3) Clone repositories
+# 3) repo clones (baked-in defaults)
 WORKDIR /opt
 RUN git clone https://github.com/sethkarten/pokeagent-speedrun.git && \
     git clone https://github.com/pret/pokeemerald.git
 
-# 4) Install mGBA (example release used in original README)
+# 4) Install mGBA from release tarball (same method as README)
 WORKDIR /opt/mgba-install
 RUN wget --quiet https://github.com/mgba-emu/mgba/releases/download/0.10.5/mGBA-0.10.5-ubuntu64-focal.tar.xz && \
     tar -xf mGBA-0.10.5-ubuntu64-focal.tar.xz && \
@@ -46,7 +40,7 @@ RUN wget --quiet https://github.com/mgba-emu/mgba/releases/download/0.10.5/mGBA-
     apt-get clean && rm -rf /var/lib/apt/lists/* /opt/mgba-install/mGBA-0.10.5-ubuntu64-focal* && \
     rm -rf /opt/mgba-install
 
-# 5) Build agbcc and install it into pokeemerald
+# 5) Build agbcc (for pokeemerald) and install into pokeemerald
 WORKDIR /opt
 RUN git clone https://github.com/pret/agbcc.git /opt/agbcc && \
     cd /opt/agbcc && \
@@ -54,51 +48,41 @@ RUN git clone https://github.com/pret/agbcc.git /opt/agbcc && \
     ./build.sh && \
     ./install.sh ../pokeemerald
 
-# 6) Build pokeemerald
+# 6) Build pokeemerald (produces pokeemerald.gba if successful)
 WORKDIR /opt/pokeemerald
-RUN make -j$(nproc) || (cat build.log && false)
+RUN make -j$(nproc) || (echo "pokeemerald build failed; continuing" && true)
 
-# 7) Create conda env with python=3.10 and libffi=3.3; install pokeagent deps & LLM packages
+# 7) Create /opt/roms and copy built ROM there (if present)
+RUN mkdir -p /opt/roms && \
+    if [ -f /opt/pokeemerald/pokeemerald.gba ]; then \
+      cp /opt/pokeemerald/pokeemerald.gba /opt/roms/rom.gba ; \
+    fi
+
+# 8) Create conda env + install dependencies (python 3.10 + libffi=3.3)
 WORKDIR /opt/pokeagent-speedrun
-# Create env
 RUN conda create -y -n pokeagent python=3.10 libffi=3.3 && \
     /opt/conda/bin/conda clean -afy
 
-# Install python deps inside the env, including torch+cu118 and LLM libs.
-# Use PyTorch official cu118 wheels index for CUDA 11.8.
+# 9) Install python deps inside env + LLM stack
+# install requirements.txt from the repo (if exists) and install torch+hf libs
 RUN /opt/conda/bin/conda run -n pokeagent pip install --upgrade pip setuptools wheel && \
-    # install requirements.txt from pokeagent-speedrun if present
-    /opt/conda/bin/conda run -n pokeagent bash -lc "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi" && \
-    # install GPU PyTorch (CUDA 11.8) + transformers + bitsandbytes + accelerate
+    /opt/conda/bin/conda run -n pokeagent bash -lc "if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi" && \
     /opt/conda/bin/conda run -n pokeagent bash -lc "\
-      pip install --index-url https://download.pytorch.org/whl/cu118 torch torchvision torchaudio --upgrade --prefer-binary && \
-      pip install transformers accelerate bitsandbytes --upgrade \
-      pygba==0.2.9 \
-      pygame==2.6.1 \
+      pip install --index-url https://download.pytorch.org/whl/cu118 torch torchvision torchaudio --upgrade --prefer-binary || true && \
+      pip install transformers accelerate bitsandbytes --upgrade || true \
     "
 
-# Silence ALSA in headless container
-ENV SDL_AUDIODRIVER=dummy
+# 10) Create HF_HOME and roms dir (for mounts)
+RUN mkdir -p /opt/huggingface && mkdir -p /opt/roms && chown -R root:root /opt/huggingface /opt/roms
 
-# 8) Ensure server finds the ROM at Emerald-GBAdvance/rom.gba
-RUN mkdir -p /opt/pokeagent-speedrun/Emerald-GBAdvance && \
-    # If pokeemerald built pokeemerald.gba, copy it to the server location
-    if [ -f /opt/pokeemerald/pokeemerald.gba ]; then \
-      cp /opt/pokeemerald/pokeemerald.gba /opt/pokeagent-speedrun/Emerald-GBAdvance/rom.gba && \
-      cp /opt/pokeemerald/pokeemerald.gba /opt/pokeagent-speedrun/emerald/Emerald-GBAdvance/PokemonEmerald.gba || true ; \
-    fi && \
-    # If pokeagent repo includes a ROM under emerald/Emerald-GBAdvance, copy that too
-    if [ -f /opt/pokeagent-speedrun/emerald/Emerald-GBAdvance/PokemonEmerald.gba ]; then \
-      cp /opt/pokeagent-speedrun/emerald/Emerald-GBAdvance/PokemonEmerald.gba /opt/pokeagent-speedrun/Emerald-GBAdvance/rom.gba || true ; \
-    fi && \
-    # Print final result for build-time debugging
-    echo "Final contents of /opt/pokeagent-speedrun/Emerald-GBAdvance:" && ls -la /opt/pokeagent-speedrun/Emerald-GBAdvance || true
+# 11) Copy entrypoint script that activates conda & sets up rom symlink
+COPY entrypoint.sh /opt/entrypoint.sh
+RUN chmod +x /opt/entrypoint.sh
 
-    
-WORKDIR /opt/pokeagent-speedrun
+# 12) Set defaults & expose nothing by default (agent is started manually)
+WORKDIR /workspace
 ENV CONDA_DEFAULT_ENV=pokeagent
 SHELL ["/bin/bash", "-lc"]
 
-CMD source /opt/conda/etc/profile.d/conda.sh && \
-    conda activate pokeagent && \
-    /opt/start_server.sh
+ENTRYPOINT ["/opt/entrypoint.sh"]
+CMD ["bash"]
